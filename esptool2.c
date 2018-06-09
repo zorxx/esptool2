@@ -26,23 +26,23 @@
 #include "esptool2.h"
 #include "esptool2_elf.h"
 
-#define IMAGE_PADDING 16
+#define IMAGE_PADDING   16
 #define SECTION_PADDING 4
-#define CHECKSUM_INIT 0xEF
-#define BIN_MAGIC_IROM 0xEA
+#define CHECKSUM_INIT   0xEF
+#define BIN_MAGIC_NEW   0xEA
 #define BIN_MAGIC_FLASH 0xE9
 
 typedef struct {
-    Elf32_Addr          addr;
-    Elf32_Word          size;
+    uint32_t          addr;
+    uint32_t          size;
 } Section_Header;
 
 typedef struct {
     unsigned char       magic;
     unsigned char       count;
-    unsigned char       byte2;
-	unsigned char       byte3;
-    Elf32_Addr          entry;
+    unsigned char       flags1;
+    unsigned char       flags2;
+    uint32_t            entry;
 } Image_Header;
 
 static const char PADDING[IMAGE_PADDING] = {0};
@@ -100,8 +100,8 @@ bool WriteElfSection(MyElf_File *elf, FILE *outfile, char* name, bool headed,
 	// get elf section header
 	sect = GetElfSection(elf, name);
 	if(!sect) {
-		error("Error: Section '%s' not found in elf file.\r\n", name);
-		goto end_function;
+		error("Warning: Section '%s' not found in elf file.\r\n", name);
+		return true;  // Don't treat this as a fatal error	
 	}
 
 	// create image section header
@@ -117,8 +117,8 @@ bool WriteElfSection(MyElf_File *elf, FILE *outfile, char* name, bool headed,
 		}
 	}
 
-	debug("Adding section '%s', addr: 0x%08x, size: %d (+%d bytes(s) padding).\r\n",
-		name, sect->address, sect->size, pad);
+	debug("Adding section '%s', addr: 0x%08x (0x%08x actual), size: %d (+%d bytes(s) padding).\r\n",
+		name, sechead.addr, sect->address, sect->size, pad);
 	
 	// get elf section binary data
 	bindata = GetElfSectionData(elf, sect);
@@ -292,36 +292,32 @@ bool CreateBinFile(char *elffile, char *imagefile, int bootver, unsigned char mo
 	}
 
 	// set options common to standard and boot v1.2+ headers
-	imghead.byte2 = mode;
-	//imghead.byte3 = (int)((int)size << 4 | clock) && 0xff;
-	imghead.byte3 = ((size << 4) | clock) & 0xff;
+	imghead.flags1 = mode;
+	//imghead.flags2 = (int)((int)size << 4 | clock) && 0xff;
+	imghead.flags2 = ((size << 4) | clock) & 0xff;
 	imghead.entry = elf->header.e_entry;
+	if(bootver > 0)
+		imghead.magic = BIN_MAGIC_NEW;
+	else
+		imghead.magic = BIN_MAGIC_FLASH;
+	imghead.count = numsec;
+	if(bootver > 0)
+		++imghead.count;
 	debug("Size = %02x\r\n", size);
-	debug("Byte2 = %02x\r\n", imghead.byte2);
-	debug("Byte3 = %02x\r\n", imghead.byte3);
+	debug("Flags1 = %02x\r\n", imghead.flags1);
+	debug("Flags2 = %02x\r\n", imghead.flags2);
 	debug("Entry = %08x\r\n", imghead.entry);
 
-	// boot v1.2+ header
-	if (bootver == 2) {
-		// extra header
-		imghead.magic = BIN_MAGIC_IROM;
-		imghead.count = 4; // probably a version number here, not a count
-		if(fwrite(&imghead, 1, sizeof(imghead), outfile) != sizeof(imghead)) {
-			error("Error: Failed to write header to image file.\r\n");
-			goto end_function;
-		}
-		if(!WriteElfSection(elf, outfile, ".irom0.text", true, true, IMAGE_PADDING, (iromchksum ? &chksum : 0))) {
-			goto end_function;
-		}
-	}
-
-	// standard header
-    imghead.magic = BIN_MAGIC_FLASH;
-    imghead.count = numsec;
-	// write header
 	if(fwrite(&imghead, 1, sizeof(imghead), outfile) != sizeof(imghead)) {
 		error("Error: Failed to write header to image file.\r\n");
 		goto end_function;
+	}
+
+	if(bootver > 0)
+	{
+		if(!WriteElfSection(elf, outfile, ".irom0.text", true, true, IMAGE_PADDING, (iromchksum ? &chksum : 0))) {
+			goto end_function;
+		}
 	}
 
 	// add sections

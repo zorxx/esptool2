@@ -11,15 +11,15 @@ all: esptool2
 
 esptool2.o: esptool2.c esptool2.h esptool2_elf.h elf.h
 	@echo "CC $<"
-	$(CC) $(CFLAGS) -c $< -o $@
+	@$(CC) $(CFLAGS) -c $< -o $@
 
 esptool2_elf.o: esptool2_elf.c esptool2.h esptool2_elf.h elf.h
 	@echo "CC $<"
-	$(CC) $(CFLAGS) -c $< -o $@
+	@$(CC) $(CFLAGS) -c $< -o $@
 
 esptool2: esptool2.o esptool2_elf.o
 	@echo "LD $@"
-	$(LD) -o $@ $^
+	@$(LD) -o $@ $^
 
 clean:
 	@echo "RM *.o esptool2 esptool2.exe"
