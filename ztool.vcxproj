@@ -11,18 +11,18 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="esptool2_elf.c" />
-    <ClCompile Include="esptool2.c" />
+    <ClCompile Include="ztool_elf.c" />
+    <ClCompile Include="ztool.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="elf.h" />
-    <ClInclude Include="esptool2_elf.h" />
-    <ClInclude Include="esptool2.h" />
+    <ClInclude Include="ztool_elf.h" />
+    <ClInclude Include="ztool.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{F8903074-16A4-431E-BBEF-A8437E0ADE25}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
-    <RootNamespace>esptool2</RootNamespace>
+    <RootNamespace>ztool</RootNamespace>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -48,11 +48,11 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <LinkIncremental>true</LinkIncremental>
-    <IncludePath>D:\Projects\ESP8266\esptool2\include;$(IncludePath)</IncludePath>
+    <IncludePath>$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <LinkIncremental>false</LinkIncremental>
-    <IncludePath>D:\Projects\ESP8266\esptool2\include;$(IncludePath)</IncludePath>
+    <IncludePath>$(IncludePath)</IncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>

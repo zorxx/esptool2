@@ -1,27 +1,27 @@
 #
-# Makefile for esptool2
-# https://github.com/raburton/esp8266
+# Makefile for ztool
+# https://github.com/zorxx/ztool
 #
 
 CFLAGS = -O2 -Wall
 CC = gcc
 LD = gcc
 
-all: esptool2
+all: ztool
 
-esptool2.o: esptool2.c esptool2.h esptool2_elf.h elf.h
+ztool.o: ztool.c ztool.h ztool_elf.h elf.h
 	@echo "CC $<"
 	@$(CC) $(CFLAGS) -c $< -o $@
 
-esptool2_elf.o: esptool2_elf.c esptool2.h esptool2_elf.h elf.h
+ztool_elf.o: ztool_elf.c ztool.h ztool_elf.h elf.h
 	@echo "CC $<"
 	@$(CC) $(CFLAGS) -c $< -o $@
 
-esptool2: esptool2.o esptool2_elf.o
+ztool: ztool.o ztool_elf.o
 	@echo "LD $@"
 	@$(LD) -o $@ $^
 
 clean:
-	@echo "RM *.o esptool2 esptool2.exe"
+	@echo "RM *.o ztool ztool.exe"
 	@rm -f *.o
-	@rm -f esptool2 esptool2.exe
+	@rm -f ztool zool.exe

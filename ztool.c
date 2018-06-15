@@ -1,21 +1,22 @@
 /**********************************************************************************
 *
+*    Copyright 2018 Zorxx Software <zorxx@zorxx.com> 
 *    Copyright (c) 2015 Richard A Burton <richardaburton@gmail.com>
 *
-*    This file is part of esptool2.
+*    This file is part of ztool, based on esptool2.
 *
-*    esptool2 is free software: you can redistribute it and/or modify
+*    ztool is free software: you can redistribute it and/or modify
 *    it under the terms of the GNU General Public License as published by
 *    the Free Software Foundation, either version 3 of the License, or
 *    (at your option) any later version.
 *
-*    esptool2 is distributed in the hope that it will be useful,
+*    ztool is distributed in the hope that it will be useful,
 *    but WITHOUT ANY WARRANTY; without even the implied warranty of
 *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 *    GNU General Public License for more details.
 *
 *    You should have received a copy of the GNU General Public License
-*    along with esptool2.  If not, see <http://www.gnu.org/licenses/>.
+*    along with ztool.  If not, see <http://www.gnu.org/licenses/>.
 *
 **********************************************************************************/
 
@@ -26,8 +27,8 @@
 #include <time.h>
 
 #include "debug.h"
-#include "esptool2.h"
-#include "esptool2_elf.h"
+#include "ztool.h"
+#include "ztool_elf.h"
 
 #define IMAGE_PADDING   16
 #define SECTION_PADDING 4
@@ -542,39 +543,32 @@ bool CreateZbootFile(char *inFile, char *outFile, uint32_t buildVersion, uint32_
 // Main
 
 static const char *programInfo =
-   "esptool2 v2.0.0 - (c) 2015 Richard A Burton <richardaburton@gmail.com>\n" 
+   "ztool v2.0.0 - (c) 2018 Zorxx Software <zorxx@zorxx.com>\n" 
+   "               (c) 2015 Richard A Burton <richardaburton@gmail.com>\n" 
    "This program is licensed under the GPL v3.\n"
    "See the file LICENSE for details.\n";
 
 static const char *programUsage =
    "Usage:\n"
-   "  -lib\n"
-   "       Export the sdk library (.irom0.text), for a standalone app.\n"
-   "       e.g. esptool2 -elf esp8266_iot.out out.bin\n"
-   "\n"
-   "  -header\n"
-   "       Export elf sections as bytes to a C header file.\n"
-   "       e.g. esptool2 -elf esp8266_iot.out out.h .text .data .rodata\n"
-   "\n"
-   "  -bin\n"
-   "       Create binary program image, for standalone and bootloaded apps, with\n"
-   "       specified elf sections. Includes sdk library for bootloaded apps.\n"
-   "       e.g. esptool2 -bin esp8266_iot.out out.bin .text .data .rodata\n"
-   "       Options:\n"
-   "        bootloader: -boot0 -boot1 -boot2 (default -boot0)\n"
-   "          -boot0 = standalone app, not built for bootloader use\n"
-   "          -boot1 = built for bootloader v1.1\n"
-   "          -boot2 = built for bootloader v1.2+ (use for rBoot roms)\n"
-   "          (elf file must have been linked appropriately for chosen option)\n"
-   "        spi size (kb): -256 -512 -1024 -2048 -4096 (default -512)\n"
-   "        spi mode: -qio -qout -dio -dout (default -qio)\n"
-   "        spi speed: -20 -26.7 -40 -80 (default -40)\n"
-   "\n"
-   "General options:\n"
-   "  -quiet prints only error messages\n"
-   "  -debug print extra debug information\n"
-   "  -- no more options follow (needed if your elf file starts with a '-')\n"
-   "\n"
+   "   [-h|-?]       Display program help\n"
+   "   [-b|-l|-i|-z] Select output file type\n"
+   "   -b            Create file suitable for ESP8266 boot ROM\n"
+   "   -l            Create library file; a binary dump of one or more ELF sections\n"
+   "   -i            Create a c/c++ header file from one or more ELF sections\n"
+   "   -z            Create a file suitable for the zboot bootloader\n"
+   "   -e <file>     Input (ELF) filename\n"
+   "   -o <file>     Output filename\n"
+   "   -s <sect.>    List of ELF sections to process. Allowed separators include\n"
+   "                 space, comma, and semicolon\n" 
+   "   -r <sect.>    List of ELF sections to include in zboot file. These sections\n"
+   "                 are treated as ROM; not copied during the boot process.\n"
+   "   -n <string>   Description of the application to include in zboot header\n"
+   "   -v <hex>      Version (32-bit hext number) of application, included in zboot header\n"
+   "   -c <size>     Flash capacity. Valid values are: 256k, 512K, 1M, 2M, 4M\n"
+   "   -m <mode>     Flash more. Valid values are: dio, dout, qio, qout\n"
+   "   -f <speed>    Flash frequency. Valid values are: 20, 26, 40, 80\n"
+   "   -d <level>    Set the debug level (0 is least debug, 3 is most)\n"
+
    "Returns:\n"
    "   0 on success\n"
    "  -1 on failure\n";
