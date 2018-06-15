@@ -6,6 +6,7 @@
 CFLAGS = -O2 -Wall
 CC = gcc
 LD = gcc
+CFLAGS += -std=c99
 
 all: ztool
 
