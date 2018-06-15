@@ -24,6 +24,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <unistd.h>
+#include <getopt.h>
 #include <time.h>
 
 #include "debug.h"
