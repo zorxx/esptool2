@@ -22,63 +22,62 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <unistd.h>
+#include <time.h>
 
+#include "debug.h"
 #include "esptool2.h"
 #include "esptool2_elf.h"
 
 #define IMAGE_PADDING   16
 #define SECTION_PADDING 4
 #define CHECKSUM_INIT   0xEF
-#define BIN_MAGIC_NEW   0xEA
 #define BIN_MAGIC_FLASH 0xE9
+#define SEPARATOR_LIST  " ,;"
 
-typedef struct {
-    uint32_t          addr;
-    uint32_t          size;
+typedef struct
+{
+    uint32_t addr;
+    uint32_t size;
 } Section_Header;
 
-typedef struct {
-    unsigned char       magic;
-    unsigned char       count;
-    unsigned char       flags1;
-    unsigned char       flags2;
-    uint32_t            entry;
-} Image_Header;
+#define ZBOOT_MAGIC 0x279bfbf1
+
+typedef struct
+{
+    uint32_t magic;
+    uint32_t count;
+    uint32_t entry;
+    uint32_t version; 
+    uint32_t date;
+    uint32_t reserved[3];
+    char     description[88];
+} tzImageHeader;
+
+typedef struct
+{
+    uint8_t  magic;
+    uint8_t  count;
+    uint8_t  flags1;
+    uint8_t  flags2;
+    uint32_t entry;
+} tImageHeader;
 
 static const char PADDING[IMAGE_PADDING] = {0};
+uint8_t debug_level = 2;
 
-static bool debugon = false;
-static bool quieton = false;
+// --------------------------------------------------------------------------------
+// Helper Functions 
 
-// Print a standard info message (unless quiet mode)
-void print(const char* format, ...) {
-    va_list args;
+#define SECONDS_BETWEEN_1970_AND_2000 946684800L
 
-	if (!quieton) {
-		va_start(args, format);
-		vprintf(format, args);
-		va_end(args);
-	}
-}
-
-// Print a debug message (if debug mode)
-void debug(const char* format, ...) {
-    va_list args;
-
-	if (debugon) {
-		va_start(args, format);
-		vprintf(format, args);
-		va_end(args);
-	}
-}
-
-// Print an error message (always)
-void error(const char* format, ...) {
-    va_list args;
-
-	va_start(args, format);
-	vfprintf(stderr, format, args);
-	va_end(args);
+uint32_t GetZbootTimestamp()
+{
+    uint32_t current = time(NULL);
+    if(current < SECONDS_BETWEEN_1970_AND_2000)
+       return 0;
+    else
+       return (current - SECONDS_BETWEEN_1970_AND_2000);
 }
 
 // Write an elf section (by name) to an existing file.
@@ -88,97 +87,178 @@ void error(const char* format, ...) {
 //   padded - output will be padded to multiple of SECTION_PADDING bytes
 //   chksum - pointer to existing checksum to add this data to (zero if not needed)
 // Produces error message on failure (so caller doesn't need to).
-bool WriteElfSection(MyElf_File *elf, FILE *outfile, char* name, bool headed,
-	bool zeroaddr, int padto, unsigned char *chksum) {
+static bool WriteElfSection(MyElf_File *elf, FILE *fd, char* sectionNameList[], uint32_t sectionCount,
+   bool addHeader, bool zeroAddress, uint32_t padto, void *chksum, uint32_t checksumSize)
+{
+   MyElf_Section **sections = NULL;
+   bool success = true;
+   uint8_t *data = NULL;
+   uint32_t pad = 0;
+   uint32_t totalSize = 0;
+   uint32_t i;
 
-	int i, pad = 0;
-	bool ret = false;
-	unsigned char *bindata = 0;
-	Section_Header sechead;
-	MyElf_Section *sect;
+   if(sectionCount <= 0)
+      return true;  // Nothing to do?
 
-	// get elf section header
-	sect = GetElfSection(elf, name);
-	if(!sect) {
-		error("Warning: Section '%s' not found in elf file.\r\n", name);
-		return true;  // Don't treat this as a fatal error	
-	}
+   sections = (MyElf_Section **) malloc(sectionCount * sizeof(MyElf_Section *));
+   if(NULL == sections)
+   {
+      ERROR("Failed to allocate memory for section list\n");
+      return false;
+   }
 
-	// create image section header
-	sechead.addr = (zeroaddr ? 0 : sect->address);
-	sechead.size = sect->size;
+   // Get the information for all sections
+   for(i = 0; success && i < sectionCount; ++i)
+   {
+      char *sectionName = sectionNameList[i];
+
+      DEBUG("%s: Reading section '%s'\n", __func__, sectionName);
+      sections[i] = GetElfSection(elf, sectionName);
+      if(NULL == sections[i]) 
+      {
+         ERROR("Warning: Section '%s' not found in elf file.\n", sectionName);
+         success = false;
+      }
+      else
+      {
+         uint32_t sectionSize = sections[i]->size;
+         uint32_t offset = totalSize;
+
+         totalSize += sectionSize; 
+         data = realloc(data, totalSize + padto); // Reserve enough space for max padding 
+         if(NULL == data)
+         {
+             ERROR("%s: Failed to allocate buffer (%u bytes)\n", __func__, totalSize + padto);
+             success = false;
+         }
+         else
+         {
+            uint8_t *buffer = GetElfSectionData(elf, sections[i], 0);
+            if(NULL == buffer)
+            {
+               ERROR("%s: Failed to read data from ELF section '%s'\n", __func__, sectionName);
+               success = false;
+            }
+            else
+            {
+               DEBUG("%s: Total size %u after %u section(s) (%s is %u bytes)\n",
+                  __func__, totalSize, i+1, sectionName, sectionSize);
+               memcpy(&data[offset], buffer, sectionSize);
+               free(buffer);
+            }
+         }
+      }
+   }
+
+   // Determine padding (if any)
+   if(success && padto > 0)
+   {
+      pad = totalSize % padto;
+      if(pad > 0)
+      {
+         pad = padto - pad;
+         DEBUG("%s: Total length is %u bytes, padto %u bytes, padding is %u bytes\n",
+            __func__, totalSize, padto, pad);
+         memset(&data[totalSize], 0xa5, pad);  // pad bytes
+         totalSize += pad;
+      }
+      else
+      {
+         DEBUG("%s: Total length is %u bytes, no padding needed (padto is %u)\n", __func__, totalSize, padto);
+      }
+   }
+
+   // Calculate checksum of data
+   if(success && NULL != chksum)
+   {
+      if(sizeof(uint32_t) == checksumSize)
+      {
+         for(uint32_t i = 0; i < totalSize; i += sizeof(uint32_t))
+            *((uint32_t *) chksum) += *((uint32_t *) (data + i));
+      }
+      else if(sizeof(uint8_t) == checksumSize)
+      {
+         for(uint32_t i = 0; i < totalSize; ++i)
+            *((uint8_t *) chksum) ^= data[i];
+      }
+      else
+      {
+         ERROR("%s; Invalid checksum size specified (%u)\n", __func__, checksumSize);
+         success = false;
+      }
+   }
+
+   if(success && addHeader)
+   {
+      Section_Header sechead;
+      sechead.addr = (zeroAddress) ? 0 : sections[0]->address;
+      sechead.size = totalSize;
+      DEBUG("Adding section header: address %08x, size %08x\n", sechead.addr,
+         sechead.size);
+      if(fwrite(&sechead, 1, sizeof(sechead), fd) != sizeof(sechead))
+      {
+         ERROR("Failed to write header\n");
+         success = false;
+      }
+
+      // 32-bit chechsums include the section header data
+      if(sizeof(uint32_t) == checksumSize)
+      {
+         *((uint32_t *) chksum) += sechead.addr;
+         *((uint32_t *) chksum) += sechead.size;
+      }
+   }
 	
-	// do we need to pad the section?
-	if (padto) {
-		pad = sechead.size % padto;
-		if (pad > 0) {
-			pad = padto - pad;
-			sechead.size += pad;
-		}
-	}
+   if(success)
+   {
+      if(fwrite(data, 1, totalSize, fd) != totalSize) 
+      {
+         ERROR("Failed to write data (%u bytes)\n", totalSize); 
+         success = false;
+      }
+   }
 
-	debug("Adding section '%s', addr: 0x%08x (0x%08x actual), size: %d (+%d bytes(s) padding).\r\n",
-		name, sechead.addr, sect->address, sect->size, pad);
-	
-	// get elf section binary data
-	bindata = GetElfSectionData(elf, sect);
-	if (!bindata) {
-		goto end_function;
-	}
-	
-	// write section (and pad if required)
-	if((headed && fwrite(&sechead, 1, sizeof(sechead), outfile) != sizeof(sechead))
-		|| fwrite(bindata, 1, sect->size, outfile) != sect->size
-		|| (pad > 0 && fwrite(PADDING, 1, pad, outfile) != pad)) {
-		error("Error: Failed to write section '%s' to image file.\r\n", name);
-		goto end_function;
-	}
-	
-	// include section data in the checksum
-	if(chksum) {
-		for(i = 0; i < (int)sect->size; i++) {
-			*chksum ^= bindata[i];
-		}
-	}
+   if(NULL != sections)
+      free(sections);
+   if(NULL != data)
+      free(data);
 
-	ret = true;
-
-end_function:
-	if (bindata) free(bindata);
-	return ret;
+   return success; 
 }
+
+
+// --------------------------------------------------------------------------------
+// Operations
 
 // Load an elf file and export a section of it to a new file, without
 // header, padding or checksum. For exporting the .irom0.text library.
 // Produces error message on failure (so caller doesn't need to).
-bool ExportElfSection(char *infile, char *outfile, char *name) {
-	
-	bool ret = false;
-	FILE *fd = 0;
-	MyElf_File *elf = 0;
+bool ExportElfSection(char *inFile, char *outFile, char *sectionName)
+{
+   MyElf_File *elf = NULL;
+   FILE *fd = NULL;
+   bool result = false;
 
-	// load elf file
-	elf = LoadElf(infile);
-	if (!elf) {
-		goto end_function;
-	}
+   elf = LoadElf(inFile);
+   if(NULL == elf)
+   {
+      ERROR("Error: Failed to open ELF file '%s'\n", inFile);
+      return false;
+   }
 
-	// open output file
-	fd = fopen(outfile, "wb");
-    if(!fd) {
-		error("Error: Can't open output file '%s' for writing.\r\n", outfile);
-        goto end_function;
-    }
+   fd = fopen(outFile, "wb");
+   if(NULL == fd)
+   { 
+      ERROR("Error: Failed to open ELF file '%s'\n", inFile);
+   }
+   else
+   {
+      result = WriteElfSection(elf, fd, &sectionName, 1, false, false, 0, NULL, 0);
+      fclose(fd);
+   }        
 
-	// actually do the export
-	ret = WriteElfSection(elf, fd, name, false, false, false, 0);
-        
-end_function:
-	// clean up
-	if (fd) fclose(fd);
-	UnloadElf(elf);
-	
-	return ret;
+   UnloadElf(elf);
+   return result;
 }
 
 // Create the main binary firmware image, from specified elf sections.
@@ -186,374 +266,551 @@ end_function:
 // or sdk bootloaded apps (integrated .irom0.text).
 // Choice of type requires appropriately linked elf file.
 // Produces error message on failure (so caller doesn't need to).
-bool CreateHeaderFile(char *elffile, char *imagefile, char *sections[], int numsec) {
+bool CreateHeaderFile(char *inFile, char *outFile, char *sections[], int numsec)
+{
+   MyElf_File *elf = NULL;
+   FILE *fd = NULL;
+   bool success = true;  // optimism
 
-	bool ret = false;
-	int i;
-	unsigned int j, len;
-	FILE *outfile = 0;
-	MyElf_File *elf = 0;
-	MyElf_Section *sect;
-	unsigned char *bindata = 0;
-	char name[31];
-	
-	// load elf file
-	elf = LoadElf(elffile);
-	if (!elf) {
-		goto end_function;
-	}
+   elf = LoadElf(inFile);
+   if(NULL == elf)
+   {
+      ERROR("Failed to open ELF file '%s'\n", inFile);
+      return false;
+   }
     
-	// open output file
-	outfile = fopen(imagefile, "wb");
-	if(outfile == NULL) {
-		error("Error: Failed to open output file '%s' for writing.\r\n", imagefile);
-		goto end_function;
-	}
+   fd = fopen(outFile, "wb");
+   if(NULL == fd)
+   {
+      ERROR("Error: Failed to open output file '%s' for writing.\n", outFile);
+      UnloadElf(elf);
+      return false;
+   }
 
-	// add entry point
-	fprintf(outfile, "const uint32 entry_addr = 0x%08x;\r\n", elf->header.e_entry);
+   fprintf(fd, "const uint32 entry_addr = 0x%08x;\n", elf->header.e_entry);
 
-	// add sections
-	for (i = 0; i < numsec; i++) {
-		// get elf section header
-		sect = GetElfSection(elf, sections[i]);
-		if(!sect) {
-			error("Error: Section '%s' not found in elf file.\r\n", sections[i]);
-			goto end_function;
-		}
+   for (int i = 0; success && i < numsec; ++i)
+   {
+      char *sectionName = sections[i];
+      MyElf_Section *sect = GetElfSection(elf, sectionName);
+      if(NULL == sect)
+      {
+         ERROR("Failed to load section '%s'\n", sectionName);
+         success = false;
+      }
+      else
+      {
+	 uint8_t *bindata = NULL;
+         char name[31];
+         size_t len;
+         int j;
+		
+         strncpy(name, sect->name, 31);  // simple name fix name
+         len = strlen(name);
+         for(j = 0; j < len; j++)
+            if (name[j] == '.') name[j] = '_';
 
-		// simple name fix name
-		strncpy(name, sect->name, 31);
-		len = strlen(name);
-		for (j = 0; j < len; j++) {
-			if (name[j] == '.') name[j] = '_';
-		}
+         // add address, length and start the data block
+         DEBUG("Adding section '%s', addr: 0x%08x, size: %d.\n", sectionName, sect->address, sect->size);
+         fprintf(fd, "\nconst uint32 %s_addr = 0x%08x;\nconst uint32 %s_len = %d;\nconst uint8  %s_data[] = {",
+            name, sect->address, name, sect->size, name);
 
-		// add address, length and start the data block
-		debug("Adding section '%s', addr: 0x%08x, size: %d.\r\n", sections[i], sect->address, sect->size);
-		fprintf(outfile, "\r\nconst uint32 %s_addr = 0x%08x;\r\nconst uint32 %s_len = %d;\r\nconst uint8  %s_data[] = {",
-			name, sect->address, name, sect->size, name);
-
-		// get elf section binary data
-		bindata = GetElfSectionData(elf, sect);
-		if (!bindata) {
-			goto end_function;
-		}
-
-		// add the data and finish off the block
-		for (j = 0; j < sect->size; j++) {
-			if (j % 16 == 0) fprintf(outfile, "\r\n  0x%02x,", bindata[j]);
-			else fprintf(outfile, " 0x%02x,", bindata[j]);
-		}
-		fprintf(outfile, "\r\n};\r\n");
-		free(bindata);
-		bindata = 0;
-	}
-	
-	// if we got this far everything worked!
-	ret = true;
-
-end_function:
-	// clean up
-	if (outfile) fclose(outfile);
-	if (elf) UnloadElf(elf);
-	if (bindata) free(bindata);
-	
-	return ret;
+         // get elf section binary data
+         bindata = GetElfSectionData(elf, sect, 0);
+         if(NULL == bindata)
+         {
+            ERROR("Failed to read data for section '%s'\n", sectionName);
+            success = false;
+         }
+         else
+         {
+            for (j = 0; j < sect->size; j++)
+            {
+               if (j % 16 == 0)
+                  fprintf(fd, "\r\n  0x%02x,", bindata[j]);
+               else
+                  fprintf(fd, " 0x%02x,", bindata[j]);
+            }
+            fprintf(fd, "\r\n};\r\n");
+            free(bindata);
+	 }
+      }
+   }
+ 
+   fclose(fd);
+   UnloadElf(elf);
+   return success;	
 }
 
-// Create the main binary firmware image, from specified elf sections.
-// Can produce for standard standalone app (separate .irom0.text)
-// or sdk bootloaded apps (integrated .irom0.text).
-// Choice of type requires appropriately linked elf file.
-// Produces error message on failure (so caller doesn't need to).
-bool CreateBinFile(char *elffile, char *imagefile, int bootver, unsigned char mode,
-	unsigned char clock, unsigned char size, bool iromchksum, char *sections[], int numsec) {
+bool CreateBinFile(char *inFile, char *outFile, uint8_t flashMode, uint8_t flashClock,
+   uint8_t flashSize, char *romSectionList[], uint32_t romSectionCount,
+   char *otherSectionList[], uint32_t otherSectionCount)
+{
+   MyElf_File *elf = NULL;
+   FILE *fd = NULL;
+   uint8_t chksum = CHECKSUM_INIT;
+   bool success = true; // optimism
+   uint32_t i;
 
-	bool ret = false;
-	int i, pad, len;
-	unsigned char chksum = CHECKSUM_INIT;
-	unsigned char *data = 0;
-	FILE *outfile = 0;
-	MyElf_File *elf = 0;
-	Image_Header imghead;
-	
-	// load elf file
-	elf = LoadElf(elffile);
-	if (!elf) {
-		goto end_function;
-	}
+   elf = LoadElf(inFile);
+   if(NULL == elf)
+   {
+      ERROR("Failed to open ELF file '%s'\n", inFile);
+      success = false;
+   }
     
-	// open output file
-	outfile = fopen(imagefile, "wb");
-	if(outfile == NULL) {
-		error("Error: Failed to open output file '%s' for writing.\r\n", imagefile);
-		goto end_function;
-	}
+   if(success)
+   {
+      fd = fopen(outFile, "wb");
+      if(NULL == fd)
+      {
+         ERROR("Failed to open output file '%s'\n", outFile);
+         success = false;
+      }
+   }
 
-	// set options common to standard and boot v1.2+ headers
-	imghead.flags1 = mode;
-	//imghead.flags2 = (int)((int)size << 4 | clock) && 0xff;
-	imghead.flags2 = ((size << 4) | clock) & 0xff;
-	imghead.entry = elf->header.e_entry;
-	if(bootver > 0)
-		imghead.magic = BIN_MAGIC_NEW;
-	else
-		imghead.magic = BIN_MAGIC_FLASH;
-	imghead.count = numsec;
-	if(bootver > 0)
-		++imghead.count;
-	debug("Size = %02x\r\n", size);
-	debug("Flags1 = %02x\r\n", imghead.flags1);
-	debug("Flags2 = %02x\r\n", imghead.flags2);
-	debug("Entry = %08x\r\n", imghead.entry);
+   if(success)
+   {
+      tImageHeader imageHeader;
+      imageHeader.magic = BIN_MAGIC_FLASH;
+      imageHeader.count = otherSectionCount + ((romSectionCount > 0) ? 1 : 0); 
+      imageHeader.flags1 = flashMode;
+      imageHeader.flags2 = ((flashSize << 4) | flashClock) & 0xf;
+      imageHeader.entry = elf->header.e_entry;
+      DEBUG("Image header: magic 0x%02x, section count %u, flags1 0x%02x, flags2 0x%02x, entry 0x%08x\n",
+         imageHeader.magic, imageHeader.count, imageHeader.flags1, imageHeader.flags2,
+         imageHeader.entry); 
+      if(fwrite(&imageHeader, 1, sizeof(imageHeader), fd) != sizeof(imageHeader))
+      {
+         ERROR("Failed to write image header\n");
+         success = false;
+      }
+   }
+      
+   // Write all of the ROM sections first, with just one header for all
+   if(success && romSectionCount > 0 && NULL != romSectionList)
+   {
+      if(!WriteElfSection(elf, fd, romSectionList, romSectionCount, true, true, SECTION_PADDING,
+         &chksum, sizeof(uint8_t)))
+      {
+         ERROR("Failed to write ROM section(s)\n");
+         success = false;
+      }
+   }
 
-	if(fwrite(&imghead, 1, sizeof(imghead), outfile) != sizeof(imghead)) {
-		error("Error: Failed to write header to image file.\r\n");
-		goto end_function;
-	}
+   for(i = 0; success && i < otherSectionCount; ++i)
+   {
+      char *sectionName = otherSectionList[i];
+      if(!WriteElfSection(elf, fd, &sectionName, 1, true, false, SECTION_PADDING, &chksum, sizeof(uint8_t)))
+      {
+         ERROR("Failed to write section '%s'\n", sectionName);
+         success = false;
+      }
+   }
+ 
+   if(success)
+   {
+      size_t len = ftell(fd) + sizeof(uint8_t);  // Total size, plus checksum
+      uint32_t pad = len % IMAGE_PADDING;
+      if (pad > 0)
+      { 
+         pad = IMAGE_PADDING - pad;
+         DEBUG("%s: Padding image with %d byte(s).\n", __func__, pad);
+         if(fwrite(PADDING, 1, pad, fd) != pad) 
+         {
+            ERROR("Error: Failed to write padding to image file.\n");
+            success = false;
+         }
+      }
+      else
+      {
+         DEBUG("%s: No image padding needed (size %lu, padto %u)\n", __func__, len, IMAGE_PADDING);
+      }
+   }
 
-	if(bootver > 0)
-	{
-		if(!WriteElfSection(elf, outfile, ".irom0.text", true, true, IMAGE_PADDING, (iromchksum ? &chksum : 0))) {
-			goto end_function;
-		}
-	}
+   if(success)
+   {
+      DEBUG("%s: Writing checksum 0x%02x\n", __func__, chksum);
+      if(fwrite(&chksum, 1, sizeof(chksum), fd) != sizeof(chksum))
+      {
+         ERROR("Error: Failed to write checksum to image file.\n");
+         success = false;
+      }
+   }
 
-	// add sections
-	for (i = 0; i < numsec; i++) {
-		if(!WriteElfSection(elf, outfile, sections[i], true, false, SECTION_PADDING, &chksum)) {
-			goto end_function;
-		}
-	}
+   if(NULL != fd)
+      fclose(fd);
+   if(NULL != elf)
+      UnloadElf(elf);
 	
-	// get image length (plus a byte for the checksum)
-	len = ftell(outfile) + 1;
-
-	// do we need to pad the image?
-	pad = len % IMAGE_PADDING;
-	if (pad > 0) {
-		pad = IMAGE_PADDING - pad;
-		debug("Padding image with %d byte(s).\r\n", pad);
-		if(fwrite(PADDING, 1, pad, outfile) != pad) {
-			error("Error: Failed to write padding to image file.\r\n");
-			goto end_function;
-		}
-	}
-
-	// write checksum
-	if(fwrite(&chksum, 1, 1, outfile) != 1) {
-        error("Error: Failed to write checksum to image file.\r\n");
-		goto end_function;
-    }
-
-	// boot v1.1
-	if(bootver == 1) {
-		// write 'ff' padding up to the position of the library
-		len = 0x10000 - ftell(outfile);
-		debug("Adding boot v1.1 padding, %d bytes of '0xff'.\r\n", len);
-		data = (unsigned char*)malloc(len);
-		if (!data) {
-			error("Error: Can't allocate memory.\r\n");
-			goto end_function;
-		}
-
-		memset(data, 0xff, len);
-		if(fwrite(data, 1, len, outfile) != len) {
-			error("Error: Failed to write boot v1.1 spacer.\r\n");
-			goto end_function;
-		}
-
-		// write the library
-		if(!WriteElfSection(elf, outfile, ".irom0.text", false, false, 0, 0)) {
-			goto end_function;
-		}
-	}
-
-	// if we got this far everything worked!
-	ret = true;
-
-end_function:
-	// clean up
-	if (outfile) fclose(outfile);
-	if (data) free(data);
-	if (elf) UnloadElf(elf);
-	
-	return ret;
+   return success;
 }
 
-int main(int argc, char *argv[]) {
+bool CreateZbootFile(char *inFile, char *outFile, uint32_t buildVersion, uint32_t buildDate, 
+   char *buildDescription, char *romSectionList[], uint32_t romSectionCount,
+   char *otherSectionList[], uint32_t otherSectionCount)
+{
+   MyElf_File *elf = NULL;
+   FILE *fd = NULL;
+   uint32_t chksum = 0; 
+   bool success = true; // optimism
+   uint32_t i;
 
-	int i;
-	char *infile;
-	char *outfile;
-	int numstr;
-	bool binfile = false;
-	bool libfile = false;
-	bool headerfile = false;
-	bool paramerror = false;
-	bool iromchksum = false;
-	int bootver = 0;
-	unsigned char mode = 0;
-	unsigned char size = 0;
-	unsigned char clock = 0;
-	int opts = 0;
+   elf = LoadElf(inFile);
+   if(NULL == elf)
+   {
+      ERROR("Failed to open ELF file '%s'\n", inFile);
+      success = false;
+   }
+    
+   if(success)
+   {
+      fd = fopen(outFile, "wb");
+      if(NULL == fd)
+      {
+         ERROR("Failed to open output file '%s'\n", outFile);
+         success = false;
+      }
+   }
 
-	// parse options
-	for (i = 1; i < argc; i++) {
-		if (!strcmp(argv[i], "-bin")) {
-			binfile = true;
-			opts++;
-		} else if (!strcmp(argv[i], "-lib")) {
-			libfile = true;
-			opts++;
-		} else if (!strcmp(argv[i], "-header")) {
-			headerfile = true;
-			opts++;
-		} else if (!strcmp(argv[i], "-quiet")) {
-			quieton = true;
-		} else if (!strcmp(argv[i], "-debug")) {
-			debugon = true;
-		} else if (!strcmp(argv[i], "-boot0")) {
-			bootver = 0;
-		} else if (!strcmp(argv[i], "-boot1")) {
-			bootver = 1;
-		} else if (!strcmp(argv[i], "-boot2")) {
-			bootver = 2;
-		} else if (!strcmp(argv[i], "-qio")) {
-			mode = 0;
-		} else if (!strcmp(argv[i], "-qout")) {
-			mode = 1;
-		} else if (!strcmp(argv[i], "-dio")) {
-			mode = 2;
-		} else if (!strcmp(argv[i], "-dout")) {
-			mode = 3;
-		} else if (!strcmp(argv[i], "-256")) {
-			size = 1;
-		} else if (!strcmp(argv[i], "-512")) {
-			size = 0;
-		} else if (!strcmp(argv[i], "-1024")) {
-			size = 2;
-		} else if (!strcmp(argv[i], "-2048")) {
-			size = 3;
-		} else if (!strcmp(argv[i], "-4096")) {
-			size = 4;
-		} else if (!strcmp(argv[i], "-20")) {
-			clock = 2;
-		} else if (!strcmp(argv[i], "-26.7")) {
-			clock = 1;
-		} else if (!strcmp(argv[i], "-40")) {
-			clock = 0;
-		} else if (!strcmp(argv[i], "-80")) {
-			clock = 15;
-		} else if (!strcmp(argv[i], "-iromchksum")) {
-			iromchksum = true;
-		} else if (!strcmp(argv[i], "--")) {
-			i++;
-			break;
-		} else if (argv[i][0] == '-') {
-			paramerror = true;
-			break;
-		} else {
-			break;
-		}
-	}
+   if(success)
+   {
+      tzImageHeader imageHeader;
+      memset(&imageHeader, 0, sizeof(imageHeader));
+      imageHeader.magic = ZBOOT_MAGIC; 
+      imageHeader.count = otherSectionCount + ((romSectionCount > 0) ? 1 : 0); 
+      imageHeader.entry = elf->header.e_entry;
+      imageHeader.version = buildVersion;
+      imageHeader.date = buildDate;
+      if(NULL != buildDescription)
+         strncpy(imageHeader.description, buildDescription, sizeof(imageHeader.description));
+      DEBUG("Image header: magic 0x%08x, count %u, entry 0x%08x, version 0x%08x, date 0x%08x, description '%s'\n",
+         imageHeader.magic, imageHeader.count, imageHeader.entry, imageHeader.version, imageHeader.date,
+         imageHeader.description);
+      if(fwrite(&imageHeader, 1, sizeof(imageHeader), fd) != sizeof(imageHeader))
+      {
+         ERROR("Failed to write image header\n");
+         success = false;
+      }
 
-	print("esptool2 v2.0.0 - (c) 2015 Richard A Burton <richardaburton@gmail.com>\r\n");
-	print("This program is licensed under the GPL v3.\r\n");
-    print("See the file LICENSE for details.\r\n\r\n");
+      for(i = 0; i < sizeof(imageHeader); i += sizeof(uint32_t))
+         chksum += *((uint32_t *)(((uint8_t *) &imageHeader) + i));
+   }
+   DEBUG("%s: Image header checksum = %08x\n", __func__, chksum);
+      
+   // Write all of the ROM sections first, with just one header for all
+   if(success && romSectionCount > 0 && NULL != romSectionList)
+   {
+      if(!WriteElfSection(elf, fd, romSectionList, romSectionCount, true, true,
+         SECTION_PADDING, &chksum, sizeof(chksum)))
+      {
+         ERROR("Failed to write ROM section(s)\n");
+         success = false;
+      }
+   }
 
-	if (paramerror) {
-		error("Error: Unrecognised option '%s'.\r\n", argv[i]);
-		return -1;
-	}
+   for(i = 0; success && i < otherSectionCount; ++i)
+   {
+      char *sectionName = otherSectionList[i];
+      if(!WriteElfSection(elf, fd, &sectionName, 1, true, false,
+         SECTION_PADDING, &chksum, sizeof(chksum)))
+      {
+         ERROR("Failed to write section '%s'\n", sectionName);
+         success = false;
+      }
+   }
+ 
+   if(success)
+   {
+      DEBUG("%s: Writing checksum 0x%08x\n", __func__, chksum);
+      if(fwrite(&chksum, 1, sizeof(chksum), fd) != sizeof(chksum))
+      {
+         ERROR("Error: Failed to write checksum to image file.\n");
+         success = false;
+      }
+   }
 
-	if (argc < 2) {
-		print("Usage:\r\n");
-		print("esptool2 -lib [options] <input_file> <output_file>\r\n");
-		print("esptool2 -bin [options] <input_file> <output_file> <elf_section>...\r\n");
-		print("esptool2 -header [options] <input_file> <output_file> <elf_section>...\r\n");
-		print("\r\n");
-		print("  -lib\r\n");
-		print("       Export the sdk library (.irom0.text), for a standalone app.\r\n");
-		print("       e.g. esptool2 -elf esp8266_iot.out out.bin\r\n");
-		print("\r\n");
-		print("  -header\r\n");
-		print("       Export elf sections as bytes to a C header file.\r\n");
-		print("       e.g. esptool2 -elf esp8266_iot.out out.h .text .data .rodata\r\n");
-		print("\r\n");
-		print("  -bin\r\n");
-		print("       Create binary program image, for standalone and bootloaded apps, with\r\n");
-		print("       specified elf sections. Includes sdk library for bootloaded apps.\r\n");
-		print("       e.g. esptool2 -bin esp8266_iot.out out.bin .text .data .rodata\r\n");
-		print("       Options:\r\n");
-		print("        bootloader: -boot0 -boot1 -boot2 (default -boot0)\r\n");
-		print("          -boot0 = standalone app, not built for bootloader use\r\n");
-		print("          -boot1 = built for bootloader v1.1\r\n");
-		print("          -boot2 = built for bootloader v1.2+ (use for rBoot roms)\r\n");
-		print("          (elf file must have been linked appropriately for chosen option)\r\n");
-		print("        spi size (kb): -256 -512 -1024 -2048 -4096 (default -512)\r\n");
-		print("        spi mode: -qio -qout -dio -dout (default -qio)\r\n");
-		print("        spi speed: -20 -26.7 -40 -80 (default -40)\r\n");
-		print("        include irom in checksum: -iromchksum (also needs enabling in rBoot)\r\n");
-		print("\r\n");
-		print("General options:\r\n");
-		print("  -quiet prints only error messages\r\n");
-		print("  -debug print extra debug information\r\n");
-		print("  -- no more options follow (needed if your elf file starts with a '-')\r\n");
-		print("\r\n");
-		print("Returns:\r\n");
-		print("   0 on success\r\n");
-		print("  -1 on failure\r\n");
-		print("\r\n");
-		return -1;
-	}
-
-	// validate command line options
-	if (opts != 1) {
-		error("Error: You must specify -bin OR -lib OR -header for build type.\r\n");
-		return -1;
-	}
-
-	if (quieton && debugon) {
-		error("Error: You cannot specify -quiet and -debug.\r\n");
-		return -1;
-	}
-
-	// check enough parameters
-	if ((libfile && i + 2 > argc) || ((binfile | headerfile) && i + 3 > argc)) {
-		error("Error: Not enough arguments supplied.\r\n");
-		return -1;
-	} else if (libfile && i + 2 < argc) {
-		error("Error: Too many arguments supplied.\r\n");
-		return -1;
-	}
-
-	// get parameters
-	infile = argv[i++];
-	outfile = argv[i++];
-	numstr = argc - i;
-
-	// do it
-	if (binfile) {
-		if (!CreateBinFile(infile, outfile, bootver, mode, clock, size, iromchksum, &argv[i], numstr)) {
-			remove(outfile);
-			return -1;
-		}
-	} else if (headerfile) {
-		if (!CreateHeaderFile(infile, outfile, &argv[i], numstr)) {
-			remove(outfile);
-			return -1;
-		}
-	} else {
-		if (!ExportElfSection(infile, outfile, ".irom0.text")) {
-			remove(outfile);
-			return -1;
-		}
+   if(NULL != fd)
+      fclose(fd);
+   if(NULL != elf)
+      UnloadElf(elf);
 	
-	}
-	
-	print("Successfully created '%s'.\r\n", outfile);
-	return 0;
+   return success;
+}
 
+// ----------------------------------------------------------------------------------------
+// Main
+
+static const char *programInfo =
+   "esptool2 v2.0.0 - (c) 2015 Richard A Burton <richardaburton@gmail.com>\n" 
+   "This program is licensed under the GPL v3.\n"
+   "See the file LICENSE for details.\n";
+
+static const char *programUsage =
+   "Usage:\n"
+   "  -lib\n"
+   "       Export the sdk library (.irom0.text), for a standalone app.\n"
+   "       e.g. esptool2 -elf esp8266_iot.out out.bin\n"
+   "\n"
+   "  -header\n"
+   "       Export elf sections as bytes to a C header file.\n"
+   "       e.g. esptool2 -elf esp8266_iot.out out.h .text .data .rodata\n"
+   "\n"
+   "  -bin\n"
+   "       Create binary program image, for standalone and bootloaded apps, with\n"
+   "       specified elf sections. Includes sdk library for bootloaded apps.\n"
+   "       e.g. esptool2 -bin esp8266_iot.out out.bin .text .data .rodata\n"
+   "       Options:\n"
+   "        bootloader: -boot0 -boot1 -boot2 (default -boot0)\n"
+   "          -boot0 = standalone app, not built for bootloader use\n"
+   "          -boot1 = built for bootloader v1.1\n"
+   "          -boot2 = built for bootloader v1.2+ (use for rBoot roms)\n"
+   "          (elf file must have been linked appropriately for chosen option)\n"
+   "        spi size (kb): -256 -512 -1024 -2048 -4096 (default -512)\n"
+   "        spi mode: -qio -qout -dio -dout (default -qio)\n"
+   "        spi speed: -20 -26.7 -40 -80 (default -40)\n"
+   "\n"
+   "General options:\n"
+   "  -quiet prints only error messages\n"
+   "  -debug print extra debug information\n"
+   "  -- no more options follow (needed if your elf file starts with a '-')\n"
+   "\n"
+   "Returns:\n"
+   "   0 on success\n"
+   "  -1 on failure\n";
+
+typedef enum
+{
+   MODE_INVALID,
+   MODE_LIBRARY,
+   MODE_HEADER,
+   MODE_BINARY,
+   MODE_ZBOOT
+} eOperation;
+
+char **StringToList(char *string, char *separators, uint32_t *count)
+{
+   char **result = NULL;
+   char *current = string;
+   uint32_t c = 0;
+
+   current = strtok(string, separators);
+   while(NULL != current) 
+   {
+      result = (char **) realloc(result, (c+1) * sizeof(char *));
+      if(NULL == result)
+         return NULL;
+
+      result[c++] = current; 
+      current = strtok(NULL, separators); 
+   }
+
+   if(NULL != count)
+      *count = c;
+   return result;
+}
+
+int main(int argc, char *argv[])
+{
+   char *inFile = NULL;
+   char *outFile = NULL;
+   char **romSections = NULL;
+   uint32_t romSectionCount = 0;
+   char **otherSections = NULL;
+   uint32_t otherSectionCount = 0;
+   uint32_t buildVersion = 0;
+   char *buildDescription = NULL;
+   eOperation operation = MODE_INVALID; 
+   bool paramError = false;
+   bool displayHelp = false;
+   uint8_t flashMode = 0;
+   uint8_t flashSize = 0;
+   uint8_t flashClock = 0;
+   int result = -1;
+   int opt;
+
+   while ((opt = getopt(argc, argv, "blihz?d:f:c:v:n:m:e:o:r:s:")) != -1)
+   {
+      switch (opt)
+      {
+         case 'h':   // Help
+         case '?':
+            displayHelp = true;
+            break;
+         case 'e':   // Input (ELF) file
+            inFile = optarg;
+            break;
+         case 'o':   // Output file
+            outFile = optarg;
+            break;
+         case 'b':   // binary file
+            operation = MODE_BINARY; 
+            break;
+         case 'i':   // header (include) file
+            operation = MODE_HEADER; 
+            break;
+         case 'l':   // library file
+            operation = MODE_LIBRARY; 
+            break;
+         case 'z':   // zboot file
+            operation = MODE_ZBOOT; 
+            break;
+         case 'd':   // debug level 
+            debug_level = atoi(optarg); 
+            break;
+         case 'r':   // ROM section list
+            romSections = StringToList(optarg, SEPARATOR_LIST, &romSectionCount);
+            break;
+         case 's':   // non-ROM section list
+            otherSections = StringToList(optarg, SEPARATOR_LIST, &otherSectionCount);
+            break;
+         case 'v':   // build version 
+            buildVersion = strtoul(optarg, NULL, 16);
+            break;
+         case 'n':   // build description 
+            buildDescription = optarg; 
+            break;
+         case 'c':   // flash (capacity) size 
+            if(strcmp(optarg, "256") == 0
+            || strcmp(optarg, "256K") == 0) 
+               flashSize = 1;
+            else if(strcmp(optarg, "512") == 0
+            || strcmp(optarg, "512K") == 0)
+               flashSize = 0;
+            else if(strcmp(optarg, "1024") == 0
+            || strcmp(optarg, "1M") == 0)
+               flashSize = 2;
+            else if(strcmp(optarg, "2048") == 0
+            || strcmp(optarg, "2M") == 0)
+               flashSize = 3;
+            else if(strcmp(optarg, "4096") == 0
+            || strcmp(optarg, "4M") == 0)
+               flashSize = 4;
+            else
+            {
+               error("Usupported flash size (%s)\n", optarg);
+               paramError = true;
+            }
+            break;
+         case 'm':   // flash mode
+            if(strcmp(optarg, "qio") == 0)
+               flashMode = 0;
+            else if(strcmp(optarg, "qout") == 0)
+               flashMode = 1;
+            else if(strcmp(optarg, "dio") == 0)
+               flashMode = 2;
+            else if(strcmp(optarg, "dout") == 0)
+               flashMode = 3;
+            else
+            {
+               error("Usupported flash mode (%s)\n", optarg);
+               paramError = true;
+            }
+            break;
+         case 'f':   // flash frequency (speed) 
+            if(strcmp(optarg, "20") == 0)
+               flashClock = 2;
+            else if(strcmp(optarg, "26.7") == 0
+            || strcmp(optarg, "26") == 0)
+               flashClock = 1;
+            else if(strcmp(optarg, "40") == 0)
+               flashClock = 0;
+            else if(strcmp(optarg, "80") == 0)
+               flashClock = 15;
+            else
+            {
+               error("Usupported flash speed (%s)\n", optarg);
+               paramError = true;
+            }
+            break;
+         default:
+            error("Usupported option (%c)\n", opt);
+            paramError = true;
+            break;
+      }
+   }
+
+   PRINT("%s\n", programInfo);
+   if(paramError)
+   {
+      ERROR("Parameter error\n");
+      displayHelp = true;
+   }
+
+   if(displayHelp)
+   {
+      PRINT("%s\n", programUsage);
+      return -1;
+   }
+
+   switch(operation)
+   {
+      case MODE_LIBRARY:
+         if(NULL == inFile || NULL == outFile)
+         {
+            ERROR("Must specify input and output files\n");
+         }
+         else if (!ExportElfSection(inFile, outFile, ".irom0.text"))
+         {
+            ERROR("Failed to create library file\n");
+         }
+         else
+         {
+            PRINT("Successfully created library '%s'.\r\n", outFile);
+            result = 0;
+         }
+         break;
+      case MODE_HEADER:
+         if(NULL == inFile || NULL == outFile)
+         {
+            ERROR("Must specify input and output files\n");
+         }
+         else if (!CreateHeaderFile(inFile, outFile, otherSections, otherSectionCount))
+         {
+            ERROR("Failed to create header file\n");
+         }
+         else
+         {
+            PRINT("Successfully created header file '%s'\r\n", outFile);
+            result = 0;
+         }
+         break;
+      case MODE_BINARY:
+         if(NULL == inFile || NULL == outFile)
+         {
+            ERROR("Must specify input and output files\n");
+         }
+         else if (!CreateBinFile(inFile, outFile, flashMode, flashClock, flashSize,
+            romSections, romSectionCount, otherSections, otherSectionCount))
+         {
+            ERROR("Failed to create binary file\n");
+         }
+         else
+         {
+            PRINT("Successfully created binary file '%s'\r\n", outFile);
+            result = 0;
+         }
+         break;
+      case MODE_ZBOOT:
+         if(NULL == inFile || NULL == outFile)
+         {
+            ERROR("Must specify input and output files\n");
+         }
+         else if (!CreateZbootFile(inFile, outFile, buildVersion, GetZbootTimestamp(),
+            buildDescription, romSections, romSectionCount, otherSections, otherSectionCount))
+         {
+            ERROR("Failed to create binary file\n");
+         }
+         else
+         {
+            PRINT("Successfully created binary file '%s'\r\n", outFile);
+            result = 0;
+         }
+         break;
+      default:
+         ERROR("Unknown operation (%d)\n", operation);
+         return -1;
+   }
+
+   return result;
 }

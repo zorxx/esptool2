@@ -23,6 +23,7 @@
 #define ESPTOOL2_ELF_H
 
 #include <stdio.h>
+#include <stdint.h>
 
 #include "elf.h"
 
@@ -43,6 +44,6 @@ typedef struct {
 MyElf_File* LoadElf(char *infile);
 void UnloadElf(MyElf_File *e_object);
 MyElf_Section* GetElfSection(MyElf_File *e_object, char *name);
-unsigned char* GetElfSectionData(MyElf_File *e_object, MyElf_Section *section);
+unsigned char* GetElfSectionData(MyElf_File *e_object, MyElf_Section *section, uint8_t pad);
 
 #endif

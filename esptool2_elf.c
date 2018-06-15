@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "debug.h"
 #include "esptool2.h"
 #include "esptool2_elf.h"
 
@@ -34,12 +35,12 @@ MyElf_Section* GetElfSection(MyElf_File *elf, char *name) {
 
     for(i = 0; i < elf->header.e_shnum - 1; i++) {
 		if(!strcmp(name, elf->sections[i].name)) {
-			debug("Found section '%s'.\r\n", name);
+			DEBUG("Found section '%s'.\r\n", name);
 			return &elf->sections[i];
 		}
 	}
 
-	debug("Could not find section '%s'.\r\n", name);
+	DEBUG("Could not find section '%s'.\r\n", name);
 	return 0;
 }
 
@@ -47,17 +48,18 @@ MyElf_Section* GetElfSection(MyElf_File *elf, char *name) {
 // Returns a pointer to newly allocated memory (or zero on error),
 // which should be freed by the caller when finished with.
 // Produces error message on failure (so caller doesn't need to).
-unsigned char* GetElfSectionData(MyElf_File *elf, MyElf_Section *section) {
+unsigned char* GetElfSectionData(MyElf_File *elf, MyElf_Section *section, uint8_t pad) {
 
     unsigned char *data = 0;
     
 	if (section->size && section->offset) {
 
-		data = (unsigned char*)malloc(section->size);
+		data = (unsigned char*)malloc(section->size + pad);
 		if(!data) {
 	        error("Error: Out of memory!\r\n");
 			return 0;
 		}
+                memset(data, 0, section->size + pad);
             
 		if(fseek(elf->fd, section->offset, SEEK_SET) ||
 		   fread(data, 1, section->size, elf->fd) != section->size) {
@@ -152,7 +154,7 @@ MyElf_File* LoadElf(char *infile) {
             error("Error: Can't read section %d from elf file.\r\n", i);
             break;
 		}
-		debug("Read section %d '%s'.\r\n", i, elf->strings + temp.sh_name);
+		DEBUG("Read section %d '%s'.\r\n", i, elf->strings + temp.sh_name);
 		elf->sections[i-1].address = temp.sh_addr;
 		elf->sections[i-1].offset = temp.sh_offset;
 		elf->sections[i-1].size = temp.sh_size;
@@ -174,7 +176,7 @@ error_exit:
 // Close an elf file and dispose of the MyElf_File structure.
 void UnloadElf(MyElf_File *elf) {
 	if (elf) {
-		debug("Unloading elf file.\r\n");
+		DEBUG("Unloading elf file.\r\n");
 		if(elf->fd) fclose(elf->fd);
 		if(elf->strings) free(elf->strings);
 		if(elf->sections) free(elf->sections);
