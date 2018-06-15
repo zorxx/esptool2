@@ -96,6 +96,7 @@ static bool WriteElfSection(MyElf_File *elf, FILE *fd, char* sectionNameList[], 
    uint8_t *data = NULL;
    uint32_t pad = 0;
    uint32_t totalSize = 0;
+   uint32_t address = 0;
    uint32_t i;
 
    if(sectionCount <= 0)
@@ -118,12 +119,14 @@ static bool WriteElfSection(MyElf_File *elf, FILE *fd, char* sectionNameList[], 
       if(NULL == sections[i]) 
       {
          ERROR("Warning: Section '%s' not found in elf file.\n", sectionName);
-         success = false;
       }
       else
       {
          uint32_t sectionSize = sections[i]->size;
          uint32_t offset = totalSize;
+
+         if(!zeroAddress && 0 == address)
+            address = sections[i]->address;
 
          totalSize += sectionSize; 
          data = realloc(data, totalSize + padto); // Reserve enough space for max padding 
@@ -192,7 +195,7 @@ static bool WriteElfSection(MyElf_File *elf, FILE *fd, char* sectionNameList[], 
    if(success && addHeader)
    {
       Section_Header sechead;
-      sechead.addr = (zeroAddress) ? 0 : sections[0]->address;
+      sechead.addr = address;
       sechead.size = totalSize;
       DEBUG("Adding section header: address %08x, size %08x\n", sechead.addr,
          sechead.size);
@@ -210,7 +213,7 @@ static bool WriteElfSection(MyElf_File *elf, FILE *fd, char* sectionNameList[], 
       }
    }
 	
-   if(success)
+   if(success && totalSize > 0)
    {
       if(fwrite(data, 1, totalSize, fd) != totalSize) 
       {

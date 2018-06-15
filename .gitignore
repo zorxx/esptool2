@@ -4,8 +4,7 @@
 *.sdf
 *.opensdf
 *.suo
-esptool
 Debug
 Release
 ipch
-esptool2
+ztool
