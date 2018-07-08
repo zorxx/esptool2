@@ -37,6 +37,9 @@
 #define BIN_MAGIC_FLASH 0xE9
 #define SEPARATOR_LIST  " ,;"
 
+#define ZBOOT_DEFAULT_BUILD_VERSION 0x00000001
+#define ZBOOT_DEFAULT_BUILD_DESCRIPTION "zboot application"
+
 typedef struct
 {
     uint32_t addr;
@@ -358,6 +361,9 @@ bool CreateBinFile(char *inFile, char *outFile, uint8_t flashMode, uint8_t flash
    bool success = true; // optimism
    uint32_t i;
 
+   DEBUG("%s: Flash mode %u, size %u, clock %u, ROM sections %u, other sections %u\n", __func__,
+      flashMode, flashSize, flashClock, romSectionCount, otherSectionCount);
+
    elf = LoadElf(inFile);
    if(NULL == elf)
    {
@@ -381,7 +387,7 @@ bool CreateBinFile(char *inFile, char *outFile, uint8_t flashMode, uint8_t flash
       imageHeader.magic = BIN_MAGIC_FLASH;
       imageHeader.count = otherSectionCount + ((romSectionCount > 0) ? 1 : 0); 
       imageHeader.flags1 = flashMode;
-      imageHeader.flags2 = ((flashSize << 4) | flashClock) & 0xf;
+      imageHeader.flags2 = (flashSize << 4) | (flashClock & 0xf);
       imageHeader.entry = elf->header.e_entry;
       DEBUG("Image header: magic 0x%02x, section count %u, flags1 0x%02x, flags2 0x%02x, entry 0x%08x\n",
          imageHeader.magic, imageHeader.count, imageHeader.flags1, imageHeader.flags2,
@@ -490,6 +496,8 @@ bool CreateZbootFile(char *inFile, char *outFile, uint32_t buildVersion, uint32_
       imageHeader.date = buildDate;
       if(NULL != buildDescription)
          strncpy(imageHeader.description, buildDescription, sizeof(imageHeader.description));
+      else
+         strcpy(imageHeader.description, ZBOOT_DEFAULT_BUILD_DESCRIPTION); 
       DEBUG("Image header: magic 0x%08x, count %u, entry 0x%08x, version 0x%08x, date 0x%08x, description '%s'\n",
          imageHeader.magic, imageHeader.count, imageHeader.entry, imageHeader.version, imageHeader.date,
          imageHeader.description);
@@ -617,7 +625,7 @@ int main(int argc, char *argv[])
    uint32_t romSectionCount = 0;
    char **otherSections = NULL;
    uint32_t otherSectionCount = 0;
-   uint32_t buildVersion = 0;
+   uint32_t buildVersion = ZBOOT_DEFAULT_BUILD_VERSION;
    char *buildDescription = NULL;
    eOperation operation = MODE_INVALID; 
    bool paramError = false;
@@ -669,7 +677,7 @@ int main(int argc, char *argv[])
          case 'n':   // build description 
             buildDescription = optarg; 
             break;
-         case 'c':   // flash (capacity) size 
+         case 'c':   // flash (capacity) size
             if(strcmp(optarg, "256") == 0
             || strcmp(optarg, "256K") == 0) 
                flashSize = 1;
