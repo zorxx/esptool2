@@ -129,6 +129,12 @@ static bool WriteElfSection(MyElf_File *elf, FILE *fd, char* sectionNameList[], 
          uint32_t sectionSize = sections[i]->size;
          uint32_t offset = totalSize;
 
+         if(0 == sectionSize)
+         {
+            DEBUG("Section '%s' is empty; skipping\n", sectionName);
+            continue;
+         }
+
          if(!zeroAddress && 0 == address)
             address = sections[i]->address;
 
